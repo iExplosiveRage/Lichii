@@ -2265,6 +2265,20 @@ bool TextureCache<P>::ImageCanRescale(ImageBase& image) {
     if (!image.info.rescaleable) {
         return false;
     }
+    // An image the scale would push past the largest 2D image Vulkan allows (32768 on current
+    // desktop GPUs) stays at its own size: it could not be created at all. Ocarina of Time's
+    // 12288x12288 shadow map at 3x would be 36864 and was left unbacked, with no sun shadows.
+    {
+        constexpr u64 MaxScaledDimension = 32768;
+        const auto& resolution = Settings::values.resolution_info;
+        const auto scaled = [&resolution](u32 size) {
+            return (u64{size} * resolution.up_scale) >> resolution.down_shift;
+        };
+        if (scaled(image.info.size.width) > MaxScaledDimension ||
+            scaled(image.info.size.height) > MaxScaledDimension) {
+            return false;
+        }
+    }
     if (Settings::values.resolution_info.downscale && !image.info.downscaleable) {
         return false;
     }
