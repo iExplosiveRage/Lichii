@@ -1,9 +1,32 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <atomic>
+
 #include "video_core/game_dlss_status.h"
 
 namespace VideoCore {
+
+namespace {
+std::atomic<bool> nvidia_dlss_paused{};
+std::atomic<char> nvidia_dlss_model{};
+} // Anonymous namespace
+
+void SetNvidiaDlssPaused(bool paused) {
+    nvidia_dlss_paused.store(paused, std::memory_order_relaxed);
+}
+
+bool NvidiaDlssPaused() {
+    return nvidia_dlss_paused.load(std::memory_order_relaxed);
+}
+
+void SetNvidiaDlssModel(char model) {
+    nvidia_dlss_model.store(model, std::memory_order_relaxed);
+}
+
+char NvidiaDlssModel() {
+    return nvidia_dlss_model.load(std::memory_order_relaxed);
+}
 
 const char* GameDlssReasonText(GameDlssReason reason) {
     switch (reason) {

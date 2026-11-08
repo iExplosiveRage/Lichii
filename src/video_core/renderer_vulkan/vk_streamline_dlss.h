@@ -77,6 +77,7 @@ private:
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;
+    u32 applied_preset = ~0U; ///< sl::DLSSPreset of the last options
     u32 frame_index{};
     vk::Image output_image;
     vk::ImageView output_view;

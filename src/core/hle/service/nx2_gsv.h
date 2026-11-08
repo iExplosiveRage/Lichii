@@ -32,6 +32,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/ocarina_photo_mode.h"
+#include "core/ocarina_render_scale.h"
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/device_memory.h"
@@ -2215,11 +2216,41 @@ private:
         }
         system.GPU().RequestComposite(std::move(layers), std::move(fences));
         CaptureFrame();
+        ApplyRenderScaleSchedule();
         Core::OcarinaPhotoMode::Update(system);
         DumpRanges();
         system.SpeedLimiter().DoSpeedLimiting(system.CoreTiming().GetGlobalTimeUs());
         system.GetPerfStats().EndSystemFrame();
         system.GetPerfStats().BeginSystemFrame();
+    }
+
+    // EDEN_NX2_OOT_SCALE_SCHEDULE=<present>:<scale>,...: sets Ocarina of Time's render scale (the
+    // built-in render scale patch's word) at those presents, as the F2 hotkey does (tests).
+    void ApplyRenderScaleSchedule() {
+        static const std::vector<std::pair<u64, float>> schedule = [] {
+            std::vector<std::pair<u64, float>> result;
+            const char* text = std::getenv("EDEN_NX2_OOT_SCALE_SCHEDULE");
+            while (text && *text) {
+                char* end{};
+                const u64 present = std::strtoull(text, &end, 10);
+                if (*end != ':') {
+                    break;
+                }
+                const float scale = std::strtof(end + 1, &end);
+                result.emplace_back(present, scale);
+                text = *end == ',' ? end + 1 : nullptr;
+            }
+            return result;
+        }();
+        for (const auto& [present, scale] : schedule) {
+            const u64 base = system.GetApplicationMainBase();
+            if (present == m_presents && base != 0) {
+                system.ApplicationMemory().Write32(
+                    base + Core::OcarinaRenderScale::StateOffset,
+                    Core::OcarinaRenderScale::StateWord(scale));
+                LOG_INFO(Service, "Ocarina of Time render scale {} at present {}", scale, present);
+            }
+        }
     }
 
     // EDEN_NX2_FRAME_CAPTURE=<dir>: every 120th present, save what the renderer shows as
@@ -2233,7 +2264,21 @@ private:
         if (directory == nullptr || (m_presents % every) != 1 % every || m_capture_pending->exchange(true)) {
             return;
         }
-        const auto layout = Layout::DefaultFrameLayout(1280, 720);
+        // EDEN_NX2_FRAME_CAPTURE_SIZE=<width>x<height> (default 1280x720).
+        static const std::pair<u32, u32> size = [] {
+            const char* value = std::getenv("EDEN_NX2_FRAME_CAPTURE_SIZE");
+            u32 width = 0;
+            u32 height = 0;
+            if (value != nullptr) {
+                char* end{};
+                width = static_cast<u32>(std::strtoul(value, &end, 10));
+                height = *end == 'x' ? static_cast<u32>(std::strtoul(end + 1, nullptr, 10)) : 0;
+            }
+            return width >= 16 && height >= 16 && width <= 16384 && height <= 16384
+                       ? std::pair{width, height}
+                       : std::pair{1280U, 720U};
+        }();
+        const auto layout = Layout::DefaultFrameLayout(size.first, size.second);
         auto pixels = std::make_shared<std::vector<u8>>(layout.width * layout.height * 4);
         const std::string path =
             fmt::format("{}/nx2-frame-{:05}.tga", directory, m_presents);

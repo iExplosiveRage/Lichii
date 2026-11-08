@@ -60,6 +60,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/photo_mode_state.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
@@ -2413,10 +2414,20 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
 }
 
 #ifdef EGLANTINE_STREAMLINE
+namespace {
+/// An Ocarina of Time scene image (target, colour or depth): the scene's size, or below full
+/// scale up to 15 pixels more on each side (the game aligns some to 16: 2240x1253 at 0.87).
+bool OcarinaSceneSized(u32 width, u32 height, VkExtent2D scene) {
+    return width >= scene.width && width < scene.width + 16 && height >= scene.height &&
+           height < scene.height + 16;
+}
+} // Anonymous namespace
+
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
     return program_id == ocarina_program && !oot_live_failed &&
-           Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable();
+           Settings::values.nvidia_dlss.GetValue() && !VideoCore::NvidiaDlssPaused() &&
+           Streamline::IsDlssAvailable();
 }
 
 /// Capture the two camera matrices from a draw targeting the scene color and depth. Terrain and
@@ -2454,15 +2465,24 @@ void RasterizerVulkan::TrackOcarinaCamera() {
         device_memory.ReadBlockUnsafe(binding.device_addr, camera.data(), sizeof(camera));
         constexpr size_t extent_offset = 0x120 / sizeof(f32);
         constexpr size_t projection_wz = 0xa8 / sizeof(f32);
-        if (camera[extent_offset] != static_cast<f32>(color.size.width) ||
-            camera[extent_offset + 1] != static_cast<f32>(color.size.height) ||
+        // The scene's size. Below full scale the game may align its target to 16 pixels and draw
+        // the scene in its corner (2227x1253 in 2240x1253 at 0.87).
+        const f32 scene_width = camera[extent_offset];
+        const f32 scene_height = camera[extent_offset + 1];
+        if (!(scene_width >= 1.0f && scene_width <= 16384.0f && scene_height >= 1.0f &&
+              scene_height <= 16384.0f) ||
             camera[projection_wz] != -1.0f || camera[projection_wz + 1] != 0.0f) {
+            return;
+        }
+        const VkExtent2D scene{static_cast<u32>(std::lround(scene_width)),
+                               static_cast<u32>(std::lround(scene_height))};
+        if (!OcarinaSceneSized(color.size.width, color.size.height, scene)) {
             return;
         }
         const std::span values{camera};
         oot_camera_sample_frame = render_trace_frame;
         oot_motion.camera_channel = gpu_memory;
-        oot_motion.extent = {color.size.width, color.size.height};
+        oot_motion.extent = scene;
         std::copy_n(values.begin() + 0x30 / sizeof(f32), 16, oot_motion.current.begin());
         std::copy_n(values.begin() + 0x180 / sizeof(f32), 16, oot_motion.previous.begin());
     });
@@ -2569,7 +2589,6 @@ void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
 bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool replace) {
     constexpr u64 depth_reader = 0x1fc7a0423116281fULL;
-    const bool upscale_4k = replace && pipeline.ShaderHash() == ComputePipeline::Ocarina1440pShader;
     if ((!replace && pipeline.ShaderHash() != depth_reader) || !OcarinaDlssEnabled()) {
         return false;
     }
@@ -2595,8 +2614,8 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         const u32 index = gpu_memory->Read<u32>(cbuf.Address() + depth_handle_offset) & 0xfffff;
         const auto tic = read_tic(index);
         const bool scene_size = oot_camera_sample_frame != render_trace_frame ||
-                                (tic && tic->Width() == oot_motion.extent.width &&
-                                 tic->Height() == oot_motion.extent.height);
+                                (tic && OcarinaSceneSized(tic->Width(), tic->Height(),
+                                                              oot_motion.extent));
         if (tic && tic->Address() && scene_size) {
             oot_motion.depth_channel = gpu_memory;
             oot_motion.depth_frame = render_trace_frame;
@@ -2628,7 +2647,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     }
     const auto tic = read_tic(oot_motion.depth_tic);
     if (!tic || tic->Address() != oot_motion.depth_address ||
-        tic->Width() != oot_motion.extent.width || tic->Height() != oot_motion.extent.height) {
+        !OcarinaSceneSized(tic->Width(), tic->Height(), oot_motion.extent)) {
         return fail("scene depth descriptor changed");
     }
 
@@ -2654,17 +2673,21 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     auto& target = texture_cache.GetImageView(written[0]);
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
-    const bool valid_extents = upscale_4k
-        ? extent.width == 2560 && extent.height == 1440 &&
-            target.size.width == 2560 && target.size.height == 1440
-        : target.size.width == extent.width * 4 / 3 &&
-            target.size.height == extent.height * 4 / 3;
+    // Into the game's 1440p image, from the full scale or a lower one (the NVIDIA DLSS modes set
+    // it through the built-in render scale patch, and each scale has its own upscale pass): NVIDIA
+    // DLSS draws 4K. Otherwise the 1080p to 1440p upscale only.
+    const bool upscale_4k = target.size.width == 2560 && target.size.height == 1440 &&
+                            extent.width <= 2560 && extent.height <= 1440 &&
+                            extent.width * 3 >= 2560 && extent.height * 3 >= 1440;
+    const bool valid_extents = upscale_4k ||
+                               (target.size.width == extent.width * 4 / 3 &&
+                                target.size.height == extent.height * 4 / 3);
     if (!valid_extents || !color.BackingImage() || !target.BackingImage() ||
         color.IsRescaled() || target.IsRescaled() ||
         color.Samples() != VK_SAMPLE_COUNT_1_BIT || target.Samples() != VK_SAMPLE_COUNT_1_BIT ||
         color.range != VideoCommon::SubresourceRange{} || target.range != VideoCommon::SubresourceRange{} ||
         color.format != PixelFormat::E5B9G9R9_FLOAT || target.format != PixelFormat::B10G11R11_FLOAT ||
-        color.size.width != extent.width || color.size.height != extent.height ||
+        !OcarinaSceneSized(color.size.width, color.size.height, extent) ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
         return fail("unexpected upscale images");
     }

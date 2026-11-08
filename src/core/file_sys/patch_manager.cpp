@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -20,6 +21,7 @@
 
 #include "core/core.h"
 #include "core/ocarina_photo_mode.h"
+#include "core/ocarina_render_scale.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
@@ -105,6 +107,13 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
 };
 
+constexpr std::array RENDER_SCALE_RECORDS{
+    BuiltinPatchRecord{Core::OcarinaRenderScale::SiteOffset, Core::OcarinaRenderScale::SiteBranch,
+                       Core::OcarinaRenderScale::SiteOriginal},
+    BuiltinPatchRecord{Core::OcarinaRenderScale::CaveOffset, Core::OcarinaRenderScale::Cave, {},
+                       true},
+};
+
 constexpr std::array PHOTO_MODE_RECORDS{
     BuiltinPatchRecord{Core::OcarinaPhotoMode::SiteOffset, Core::OcarinaPhotoMode::SiteBranch,
                        Core::OcarinaPhotoMode::SiteOriginal},
@@ -120,6 +129,18 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = MAX_RESOLUTION_RECORDS,
+    },
+    // The scale the Max Resolution path returns, from a BSS word the emulator sets (NVIDIA DLSS
+    // Quality, Balanced, Performance and Ultra Performance in Ocarina of Time; 0 keeps the full
+    // scale).
+    BuiltinPatch{
+        .name = "Render Scale for NVIDIA DLSS (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = RENDER_SCALE_RECORDS,
+        .state_offset = Core::OcarinaRenderScale::StateOffset,
+        .state_size = 4,
     },
     // Dark's routine with a tail that also lowers the step above 60 fps, so the game keeps real
     // speed at any frame rate limit (Settings frame_rate_limit).
@@ -666,6 +687,15 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         }
         LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} records) to {}", patch.name,
                  patch.records.size(), name);
+        // EDEN_NX2_OOT_RENDER_SCALE=<0..1>: the render scale Ocarina of Time starts with (tests).
+        if (patch.state_offset == Core::OcarinaRenderScale::StateOffset) {
+            if (const char* const value = std::getenv("EDEN_NX2_OOT_RENDER_SCALE")) {
+                const u32 word = Core::OcarinaRenderScale::StateWord(std::strtof(value, nullptr));
+                std::memcpy(out.data() + sizeof(Loader::NSOHeader) + patch.state_offset, &word,
+                            sizeof(word));
+                LOG_INFO(Loader, "    - Ocarina of Time render scale {:#x} at start", word);
+            }
+        }
         if (!patch.replaces.empty()) {
             replaced.push_back(patch.replaces);
         }

@@ -465,8 +465,10 @@ private:
     void UpdateFrameGenButton();
     void UpdateVolumeUI();
     void UpdateStatusBar();
-    /// A short message over the game (photo mode).
+    /// A short message over the game (photo mode, NVIDIA DLSS hotkeys).
     void ShowOsdMessage(const QString& text, int milliseconds = 2000);
+    /// Ocarina of Time: where the built-in render scale patch reads its scale, when it is applied.
+    std::optional<u64> OcarinaRenderScaleAddress() const;
     /// Photo mode: the picture ratio's frame and the hotsample window (a 100 ms timer).
     void UpdatePhotoOverlay();
     void EnterPhotoHotsample(u32 width, u32 height);
@@ -561,6 +563,7 @@ private:
     QTimer osd_timer;
     QWidget* photo_overlay = nullptr; ///< Photo mode's picture ratio frame
     QTimer photo_overlay_timer;
+    u32 dlss_scale_before_pause = 0; ///< Ocarina's render scale word when F7 switched DLSS off
     u32 photo_ratio_width = 0;
     u32 photo_ratio_height = 0;
     /// Hotsampling: the window sized to the picture; what to restore after.

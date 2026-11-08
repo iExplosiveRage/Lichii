@@ -20,6 +20,8 @@
 #include "configuration/configure_post_processing.h"
 #include "video_core/post_processing/fx_preset.h"
 #include "core/ocarina_photo_mode.h"
+#include "core/ocarina_render_scale.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/photo_mode_state.h"
 #endif
 #include "updater/update_dialog.h"
@@ -1391,6 +1393,98 @@ void MainWindow::InitializeHotkeys() {
         SetFPSSuffix();
     });
 
+    connect_shortcut(QStringLiteral("Toggle NVIDIA DLSS"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        if (!Settings::values.nvidia_dlss.GetValue()) {
+            ShowOsdMessage(tr("NVIDIA DLSS is off in this game's graphics settings"));
+            return;
+        }
+        const bool paused = !VideoCore::NvidiaDlssPaused();
+        VideoCore::SetNvidiaDlssPaused(paused);
+        // Ocarina of Time: the game's own anti-aliasing at full scale while NVIDIA DLSS is off,
+        // and the NVIDIA DLSS mode (F2) back when it is on again.
+        if (const auto address = OcarinaRenderScaleAddress()) {
+            auto& memory = QtCommon::system->ApplicationMemory();
+            if (paused) {
+                dlss_scale_before_pause = memory.Read32(*address);
+                if (dlss_scale_before_pause != 0) {
+                    memory.Write32(*address, Core::OcarinaRenderScale::StateWord(1.0f));
+                }
+            } else if (dlss_scale_before_pause != 0) {
+                memory.Write32(*address, dlss_scale_before_pause);
+                dlss_scale_before_pause = 0;
+            }
+        }
+        LOG_INFO(Frontend, "NVIDIA DLSS {} with the hotkey", paused ? "switched off" : "switched on");
+        ShowOsdMessage(paused ? tr("NVIDIA DLSS: OFF (the game's own image)")
+                              : tr("NVIDIA DLSS: ON"));
+    });
+    connect_shortcut(QStringLiteral("Cycle NVIDIA DLSS Mode"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        namespace Scale = Core::OcarinaRenderScale;
+        const auto address = OcarinaRenderScaleAddress();
+        // Only where the built-in render scale patch is in place (Ocarina of Time).
+        if (!Settings::values.nvidia_dlss.GetValue() || !address) {
+            ShowOsdMessage(tr("NVIDIA DLSS modes need Ocarina of Time with NVIDIA DLSS on"));
+            return;
+        }
+        auto& memory = QtCommon::system->ApplicationMemory();
+        // NVIDIA DLSS draws 4K from the game's 1440p image at full scale: the scale of that
+        // image picks the mode (its share of 4K: 2/3, 0.58, 1/2, 1/3).
+        struct Mode {
+            float scale;
+            const char* name;
+        };
+        static constexpr std::array<Mode, 4> modes{{
+            {1.0f, "Quality"},
+            {0.87f, "Balanced"},
+            {0.75f, "Performance"},
+            {0.5f, "Ultra Performance"},
+        }};
+        // Switched off with F7: on again, from the mode it had.
+        u32 current = memory.Read32(*address);
+        if (VideoCore::NvidiaDlssPaused()) {
+            current = dlss_scale_before_pause;
+            dlss_scale_before_pause = 0;
+            VideoCore::SetNvidiaDlssPaused(false);
+        }
+        size_t index = 0; // 0 (the game's own full scale) counts as Quality
+        for (size_t i = 0; i < modes.size(); ++i) {
+            if (Scale::StateWord(modes[i].scale) == current) {
+                index = i;
+            }
+        }
+        const Mode& next = modes[(index + 1) % modes.size()];
+        memory.Write32(*address, Scale::StateWord(next.scale));
+        LOG_INFO(Frontend, "NVIDIA DLSS mode {} (game render scale {}) with the hotkey",
+                 next.name, next.scale);
+        ShowOsdMessage(tr("NVIDIA DLSS: %1 (%2p to 4K)")
+                           .arg(QString::fromLatin1(next.name))
+                           .arg(static_cast<int>(1440.0f * next.scale + 0.5f)));
+    });
+    connect_shortcut(QStringLiteral("Cycle NVIDIA DLSS Model"), [this] {
+        if (!emulation_running) {
+            return;
+        }
+        if (!Settings::values.nvidia_dlss.GetValue()) {
+            ShowOsdMessage(tr("NVIDIA DLSS is off in this game's graphics settings"));
+            return;
+        }
+        // K (the default), M, L, J, then K again.
+        static constexpr std::array<char, 4> models{'K', 'M', 'L', 'J'};
+        const char current = VideoCore::NvidiaDlssModel();
+        const auto it = std::find(models.begin(), models.end(), current);
+        const char next = it == models.end() ? models[1]
+                          : it + 1 == models.end() ? models[0]
+                                                   : *(it + 1);
+        VideoCore::SetNvidiaDlssModel(next);
+        LOG_INFO(Frontend, "NVIDIA DLSS model {} with the hotkey", next);
+        ShowOsdMessage(tr("NVIDIA DLSS model: %1").arg(QString(QLatin1Char(next))));
+    });
     connect_shortcut(QStringLiteral("Toggle Photo Mode"), [this] {
         if (!emulation_running) {
             return;
@@ -2042,6 +2136,9 @@ bool MainWindow::SelectAndSetCurrentUser(
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
     Core::OcarinaPhotoMode::Reset();
+    VideoCore::SetNvidiaDlssPaused(false);
+    VideoCore::SetNvidiaDlssModel(0);
+    dlss_scale_before_pause = 0;
     if (nup_running && filename.toStdString() == nup_source_path) {
         QMessageBox::information(this, tr("Conversion in Progress"),
                                  tr("This game cannot be started while its dump is being "
@@ -5101,6 +5198,18 @@ void MainWindow::UpdatePhotoOverlay() {
             osd_label->raise();
         }
     }
+}
+
+std::optional<u64> MainWindow::OcarinaRenderScaleAddress() const {
+    namespace Scale = Core::OcarinaRenderScale;
+    auto& system = *QtCommon::system;
+    const u64 base = system.GetApplicationMainBase();
+    if (!emulation_running || base == 0 ||
+        system.GetApplicationProcessProgramID() != Scale::ProgramId ||
+        system.ApplicationMemory().Read32(base + Scale::SiteOffset) != Scale::SiteBranchWord()) {
+        return std::nullopt;
+    }
+    return base + Scale::StateOffset;
 }
 
 void MainWindow::ShowOsdMessage(const QString& text, int milliseconds) {

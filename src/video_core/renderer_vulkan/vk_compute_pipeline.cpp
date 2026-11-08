@@ -360,8 +360,12 @@ void ComputePipeline::RunBuild() {
 }
 
 bool ComputePipeline::CanReplaceOcarinaUpscale() const {
+    // The full-scale upscale and the ones Ocarina uses below full scale: 0.75, 2/3, 0.58 and 0.5
+    // (the NVIDIA DLSS modes set the scale through the built-in render scale patch).
     const bool known_shader =
-        shader_hash == 0xe40f5efb5480e692ULL || shader_hash == Ocarina1440pShader;
+        shader_hash == Ocarina1440pShader || shader_hash == 0xe40f5efb5480e692ULL ||
+        shader_hash == 0x9160e500fc90ff21ULL || shader_hash == 0x98ace68338de9ef8ULL ||
+        shader_hash == 0x9302bc0d6d1d9bc1ULL;
     return known_shader && !info.stores_global_memory &&
            info.image_buffer_descriptors.empty() && info.image_descriptors.size() == 1 &&
            info.image_descriptors.front().count == 1 && info.image_descriptors.front().is_written &&

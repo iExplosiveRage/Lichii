@@ -14,6 +14,7 @@
 #include "common/settings_input.h"
 #include "core/core.h"
 #include "core/memory.h"
+#include "core/ocarina_render_scale.h"
 #include "hid_core/frontend/emulated_controller.h"
 #include "hid_core/hid_core.h"
 #include "video_core/photo_mode_state.h"
@@ -74,6 +75,7 @@ struct State {
     f32 start_fov{};
     f32 aspect{};
     u32 saved_time_scale{NormalTimeScale};
+    u32 saved_render_scale{}; ///< the NVIDIA DLSS mode's scale word photo mode replaced (0: none)
     bool frozen{};
     bool hud_hidden{};
     bool haze_hidden{};
@@ -136,6 +138,33 @@ void Freeze(Core::Memory::Memory& memory, bool freeze) {
         }
     }
     state.frozen = freeze;
+}
+
+/// While photo mode is on the game renders at its full scale (NVIDIA DLSS Quality, 1440p to 4K),
+/// whatever NVIDIA DLSS mode it plays in, so pictures get every pixel; the mode comes back after.
+void BoostRenderScale(Core::Memory::Memory& memory, bool boost) {
+    namespace Scale = Core::OcarinaRenderScale;
+    const u64 address = state.base + Scale::StateOffset;
+    if (memory.Read32(state.base + Scale::SiteOffset) != Scale::SiteBranchWord()) {
+        return;
+    }
+    if (boost) {
+        const u32 current = memory.Read32(address);
+        if (current != 0 && current != Scale::StateWord(1.0f)) {
+            state.saved_render_scale = current;
+            memory.Write32(address, Scale::StateWord(1.0f));
+            LOG_INFO(Core, "Ocarina of Time photo mode: full render scale while on (was {:#x})",
+                     current);
+        }
+    } else if (state.saved_render_scale != 0) {
+        // Unless the player picked another mode meanwhile (F2).
+        if (memory.Read32(address) == Scale::StateWord(1.0f)) {
+            memory.Write32(address, state.saved_render_scale);
+            LOG_INFO(Core, "Ocarina of Time photo mode: render scale back to {:#x}",
+                     state.saved_render_scale);
+        }
+        state.saved_render_scale = 0;
+    }
 }
 
 void SetHudHidden(bool hidden) {
@@ -225,6 +254,7 @@ bool Enter(Core::System& system) {
     state.aspect = aspect > 0.5f && aspect < 4.0f ? aspect : 16.0f / 9.0f;
 
     Freeze(memory, true);
+    BoostRenderScale(memory, true);
     state.controller = FirstController(system);
     if (state.controller != nullptr) {
         state.controller->EnableConfiguration();
@@ -250,6 +280,7 @@ void Leave(Core::System& system) {
         memory.Write32(state.base + StateOffset + EnabledOffset, 0);
         memory.Write32(state.base + StateOffset + FovEnabledOffset, 0);
         Freeze(memory, false);
+        BoostRenderScale(memory, false);
     }
     if (state.controller != nullptr) {
         state.controller->DisableConfiguration();

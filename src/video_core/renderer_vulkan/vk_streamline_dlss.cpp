@@ -9,6 +9,7 @@
 
 #include "common/logging.h"
 #include "video_core/dlss_evaluation.h"
+#include "video_core/game_dlss_status.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
@@ -50,8 +51,13 @@ sl::DLSSMode ModeFor(VkExtent2D render, VkExtent2D upscale) {
 
 // Preset K for every mode: NVIDIA's defaults for Performance/Ultra Performance (M, L) draw thin
 // horizontal lines in Fire Emblem at 2x resolution scale. EDEN_NX2_DLSS_PRESET=J|K|L|M picks
-// another model, EDEN_NX2_DLSS_PRESET=default leaves the choice to NVIDIA.
+// another model, EDEN_NX2_DLSS_PRESET=default leaves the choice to NVIDIA. The model hotkey's
+// choice (VideoCore::NvidiaDlssModel) comes first.
 sl::DLSSPreset Preset() {
+    if (const char model = VideoCore::NvidiaDlssModel(); model >= 'J' && model <= 'M') {
+        return static_cast<sl::DLSSPreset>(static_cast<u32>(sl::DLSSPreset::ePresetJ) +
+                                           static_cast<u32>(model - 'J'));
+    }
     const char* const value = std::getenv("EDEN_NX2_DLSS_PRESET");
     if (value && value[0] >= 'J' && value[0] <= 'M') {
         return static_cast<sl::DLSSPreset>(static_cast<u32>(sl::DLSSPreset::ePresetJ) +
@@ -221,7 +227,10 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                 in.render_size.height != render_extent.height ||
                                 in.upscale_size.width != upscale_extent.width ||
                                 in.upscale_size.height != upscale_extent.height;
-    const bool options_changed = extent_changed || in.hdr != hdr_input;
+    const sl::DLSSPreset preset = Preset();
+    const bool options_changed = extent_changed || in.hdr != hdr_input ||
+                                 static_cast<u32>(preset) != applied_preset;
+    applied_preset = static_cast<u32>(preset);
     const bool reset = in.reset || options_changed;
     if (extent_changed) {
         CreateOutput(in.upscale_size);
@@ -240,7 +249,6 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         in.hdr && EnvInt("EDEN_NX2_DLSS_HDR", 1) != 0 ? sl::eTrue : sl::eFalse;
     options.useAutoExposure =
         in.hdr && EnvInt("EDEN_NX2_DLSS_AUTO_EXPOSURE", 1) != 0 ? sl::eTrue : sl::eFalse;
-    const sl::DLSSPreset preset = Preset();
     options.dlaaPreset = preset;
     options.qualityPreset = preset;
     options.balancedPreset = preset;

@@ -36,6 +36,16 @@ struct GameDlssStatus {
 /// The reason in English, for the log.
 [[nodiscard]] const char* GameDlssReasonText(GameDlssReason reason);
 
+/// Set from the frontend's hotkey while a game runs: NVIDIA DLSS stays loaded, but the game's own
+/// anti-aliasing or upscaler draws until it is switched back on.
+void SetNvidiaDlssPaused(bool paused);
+[[nodiscard]] bool NvidiaDlssPaused();
+
+/// The NVIDIA DLSS model (preset letter J to M) picked with the hotkey, or 0 for the default
+/// (EDEN_NX2_DLSS_PRESET, else K).
+void SetNvidiaDlssModel(char model);
+[[nodiscard]] char NvidiaDlssModel();
+
 /// One health check of a game's DLSS network output against its input, by blocks of a coarse grid
 /// (host_shaders/dlss_network_probe.comp).
 struct GameDlssProbe {

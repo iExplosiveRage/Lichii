@@ -1188,6 +1188,7 @@ add_library(core STATIC
     ocarina_igcs.cpp
     ocarina_photo_mode.cpp
     ocarina_photo_mode.h
+    ocarina_render_scale.h
     perf_stats.cpp
     perf_stats.h
     reporter.cpp
