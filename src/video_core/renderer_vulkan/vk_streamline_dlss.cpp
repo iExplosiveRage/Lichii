@@ -126,6 +126,10 @@ StreamlineDlssUpscaler::StreamlineDlssUpscaler(const Device& device_, Scheduler&
                   static_cast<int>(result));
         throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
     }
+    if (Streamline::GetApi().get_feature_function(sl::kFeatureDLSS, "slDLSSGetOptimalSettings",
+                                                  get_optimal_settings) != sl::Result::eOk) {
+        get_optimal_settings = nullptr;
+    }
     point_sampler = device.GetLogical().CreateSampler(VkSamplerCreateInfo{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .pNext = nullptr,
@@ -219,6 +223,68 @@ void StreamlineDlssUpscaler::CreateOutput(VkExtent2D upscale_size) {
     });
 }
 
+u32 StreamlineDlssUpscaler::PickMode(VkExtent2D render, VkExtent2D upscale) {
+    // Each mode takes render sizes in a range around its optimal one: Ultra Performance at 4K
+    // only up to 1280x720, so a game's dynamic resolution between two modes' optimal sizes
+    // (1593x896, Ocarina of Time without Max Resolution) failed every evaluation (NGX
+    // 0xbad00005) when the ratio alone picked the mode.
+    if (get_optimal_settings &&
+        (ranges_output.width != upscale.width || ranges_output.height != upscale.height)) {
+        ranges_output = upscale;
+        num_mode_ranges = 0;
+        const auto get = reinterpret_cast<PFun_slDLSSGetOptimalSettings*>(get_optimal_settings);
+        for (const sl::DLSSMode mode : {sl::DLSSMode::eDLAA, sl::DLSSMode::eMaxQuality,
+                                        sl::DLSSMode::eBalanced, sl::DLSSMode::eMaxPerformance,
+                                        sl::DLSSMode::eUltraPerformance}) {
+            sl::DLSSOptions options{};
+            options.mode = mode;
+            options.outputWidth = upscale.width;
+            options.outputHeight = upscale.height;
+            sl::DLSSOptimalSettings settings{};
+            if (get(options, settings) != sl::Result::eOk || settings.optimalRenderWidth == 0) {
+                continue;
+            }
+            const u32 max_width = settings.renderWidthMax != 0 ? settings.renderWidthMax
+                                                              : settings.optimalRenderWidth;
+            const u32 max_height = settings.renderHeightMax != 0 ? settings.renderHeightMax
+                                                                : settings.optimalRenderHeight;
+            mode_ranges[num_mode_ranges++] = {
+                .mode = static_cast<u32>(mode),
+                .optimal_width = settings.optimalRenderWidth,
+                .min_width = settings.renderWidthMin != 0 ? settings.renderWidthMin
+                                                          : settings.optimalRenderWidth,
+                .min_height = settings.renderHeightMin != 0 ? settings.renderHeightMin
+                                                            : settings.optimalRenderHeight,
+                .max_width = max_width,
+                .max_height = max_height,
+            };
+            LOG_INFO(Render_Vulkan,
+                     "NVIDIA DLSS (Streamline) mode {} at {}x{}: render {}x{} to {}x{}, optimal "
+                     "width {}",
+                     static_cast<int>(mode), upscale.width, upscale.height,
+                     mode_ranges[num_mode_ranges - 1].min_width,
+                     mode_ranges[num_mode_ranges - 1].min_height, max_width, max_height,
+                     settings.optimalRenderWidth);
+        }
+    }
+    const ModeRange* best = nullptr;
+    for (size_t i = 0; i < num_mode_ranges; ++i) {
+        const ModeRange& range = mode_ranges[i];
+        if (render.width < range.min_width || render.width > range.max_width ||
+            render.height < range.min_height || render.height > range.max_height) {
+            continue;
+        }
+        const auto distance = [&](const ModeRange& r) {
+            return r.optimal_width > render.width ? r.optimal_width - render.width
+                                                  : render.width - r.optimal_width;
+        };
+        if (!best || distance(range) < distance(*best)) {
+            best = &range;
+        }
+    }
+    return best ? best->mode : static_cast<u32>(ModeFor(render, upscale));
+}
+
 bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     if (failed) {
         return false;
@@ -242,7 +308,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     // Keep the existing HDR controls for linear input such as Fortune's Weave. Tonemapped
     // input such as Ocarina's already has its exposure applied.
     sl::DLSSOptions options{};
-    options.mode = ModeFor(in.render_size, in.upscale_size);
+    options.mode = static_cast<sl::DLSSMode>(PickMode(in.render_size, in.upscale_size));
     options.outputWidth = in.upscale_size.width;
     options.outputHeight = in.upscale_size.height;
     options.colorBuffersHDR =

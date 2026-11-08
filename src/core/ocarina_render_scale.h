@@ -22,6 +22,11 @@ constexpr u64 SiteOffset = 0x806420;  ///< mov w9, #0x3f800000 in the "disabled"
 constexpr u64 CaveOffset = 0x3C46300; ///< executable padding after .text
 constexpr u64 StateOffset = 0x4E9FE20; ///< BSS word, no code references its page
 
+/// The built-in Max Resolution patch's branch (main+0x805BD0, b +0x83c): without it the game
+/// follows its own dynamic resolution and never reaches SiteOffset.
+constexpr u64 MaxResolutionOffset = 0x805BD0;
+constexpr u32 MaxResolutionBranchWord = 0x1400020F;
+
 /// b CaveOffset (at SiteOffset).
 constexpr std::array<u8, 4> SiteBranch{0xB8, 0xFF, 0xD0, 0x14};
 constexpr std::array<u8, 4> SiteOriginal{0x09, 0xF0, 0xA7, 0x52};

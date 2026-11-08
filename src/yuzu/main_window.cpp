@@ -1433,6 +1433,13 @@ void MainWindow::InitializeHotkeys() {
             return;
         }
         auto& memory = QtCommon::system->ApplicationMemory();
+        if (memory.Read32(*address - Scale::StateOffset + Scale::MaxResolutionOffset) !=
+            Scale::MaxResolutionBranchWord) {
+            ShowOsdMessage(tr("NVIDIA DLSS modes need \"Max Resolution (built-in)\" on in this "
+                              "game's Add-Ons (the game picks its own resolution now)"),
+                           5000);
+            return;
+        }
         // NVIDIA DLSS draws 4K from the game's 1440p image at full scale: the scale of that
         // image picks the mode (its share of 4K: 2/3, 0.58, 1/2, 1/3).
         struct Mode {

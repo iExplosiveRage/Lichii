@@ -69,11 +69,26 @@ public:
 
 private:
     void CreateOutput(VkExtent2D upscale_size);
+    /// The DLSS mode (sl::DLSSMode) for a render size: one whose render size range NVIDIA DLSS
+    /// reports for this output takes it, nearest its optimal size; else by the ratio.
+    [[nodiscard]] u32 PickMode(VkExtent2D render, VkExtent2D upscale);
 
     const Device& device;
     Scheduler& scheduler;
     MemoryAllocator& memory_allocator;
     void* set_options{}; ///< slDLSSSetOptions
+    void* get_optimal_settings{}; ///< slDLSSGetOptimalSettings (optional)
+    struct ModeRange {
+        u32 mode{};
+        u32 optimal_width{};
+        u32 min_width{};
+        u32 min_height{};
+        u32 max_width{};
+        u32 max_height{};
+    };
+    std::array<ModeRange, 5> mode_ranges{};
+    size_t num_mode_ranges{};
+    VkExtent2D ranges_output{}; ///< the output size mode_ranges belong to
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;
