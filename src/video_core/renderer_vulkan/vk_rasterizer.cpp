@@ -2675,11 +2675,17 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     const auto extent = oot_motion.extent;
     // Into the game's 1440p image, from the full scale or a lower one (the NVIDIA DLSS modes set
     // it through the built-in render scale patch, and each scale has its own upscale pass): NVIDIA
-    // DLSS draws 4K. Otherwise the 1080p to 1440p upscale only.
-    const bool upscale_4k = target.size.width == 2560 && target.size.height == 1440 &&
-                            extent.width <= 2560 && extent.height <= 1440 &&
-                            extent.width * 3 >= 2560 && extent.height * 3 >= 1440;
-    const bool valid_extents = upscale_4k ||
+    // DLSS draws 4K. At 4K it takes 1920x1080 and up (Quality, Balanced, Performance) or exactly
+    // 1280x720 (Ultra Performance), so the sizes in between, which the game's own dynamic
+    // resolution picks without Max Resolution (1593x896 ...), go into the 1440p image instead.
+    // Otherwise the 1080p to 1440p upscale only.
+    const bool into_1440p = target.size.width == 2560 && target.size.height == 1440 &&
+                            extent.width <= 2560 && extent.height <= 1440;
+    const bool upscale_4k = into_1440p && ((extent.width >= 1920 && extent.height >= 1080) ||
+                                           (extent.width == 1280 && extent.height == 720));
+    const bool upscale_1440p = into_1440p && !upscale_4k && extent.width >= 1280 &&
+                               extent.height >= 720;
+    const bool valid_extents = upscale_4k || upscale_1440p ||
                                (target.size.width == extent.width * 4 / 3 &&
                                 target.size.height == extent.height * 4 / 3);
     if (!valid_extents || !color.BackingImage() || !target.BackingImage() ||
