@@ -1418,8 +1418,16 @@ void PipelineCache::EvictUnusedPipelines() {
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
     // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
+    // EDEN_NX2_PIPELINE_EVICT_FRAMES=<frames> (default 9000); 0 keeps every built pipeline, so a
+    // large cache preloaded with EDEN_NX2_PRELOAD_ALL_PIPELINES stays built (driver memory grows by
+    // ~0.45 MB a pipeline). Evicted ones the game reaches again are translated again on the GPU
+    // thread: with a 35k-pipeline Ocarina of Time preload, 29.5k went after 9000 frames and the
+    // field then rebuilt 825 in 10 s.
+    static const u64 EvictAfterFrames = [] {
+        const char* const value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
+        return value != nullptr ? static_cast<u64>(std::strtoull(value, nullptr, 10)) : u64{9000};
+    }();
+    if (EvictAfterFrames == 0 || frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
