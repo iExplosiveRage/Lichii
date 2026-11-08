@@ -411,6 +411,18 @@ struct Values {
                                                   false};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    // RCAS on NVIDIA DLSS's 4K image in Ocarina of Time, in stops x 100 like
+    // fsr_sharpening_slider: 200 (0%) is off.
+    SwitchableSetting<int, true> nvidia_dlss_sharpening{linkage,
+                                                        200,
+                                                        0,
+                                                        200,
+                                                        "nvidia_dlss_sharpening",
+                                                        Category::Renderer,
+                                                        Specialization::Scalar |
+                                                            Specialization::Percentage,
+                                                        true,
+                                                        true};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",

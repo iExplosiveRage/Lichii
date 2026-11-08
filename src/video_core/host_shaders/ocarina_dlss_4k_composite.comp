@@ -6,12 +6,36 @@ layout(binding = 0) uniform sampler2D dlss_scene;
 layout(binding = 1) uniform sampler2D native_scene;
 layout(binding = 2) uniform sampler2D native_composite;
 layout(binding = 3, rgba8) uniform writeonly image2D output_color;
-layout(push_constant) uniform Controls { uint use_dlss; } controls;
+// sharpness: RCAS strength (exp2(-stops), Settings nvidia_dlss_sharpening); 0 is off.
+layout(push_constant) uniform Controls { uint use_dlss; float sharpness; } controls;
 
 vec3 encode_srgb(vec3 linear) {
     linear = max(linear, vec3(0.0));
     return mix(1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
                12.92 * linear, lessThan(linear, vec3(0.0031308)));
+}
+
+// AMD FidelityFX RCAS (robust contrast-adaptive sharpening, FSR 1) on NVIDIA DLSS's image: a
+// cross of four neighbours, with the lobe limited so it never rings past them.
+vec3 sharpened_scene(ivec2 pixel, ivec2 extent) {
+    vec3 e = clamp(texelFetch(dlss_scene, pixel, 0).rgb, 0.0, 1.0);
+    if (controls.sharpness <= 0.0) {
+        return e;
+    }
+    ivec2 last = extent - 1;
+    vec3 b = clamp(texelFetch(dlss_scene, clamp(pixel + ivec2(0, -1), ivec2(0), last), 0).rgb, 0.0, 1.0);
+    vec3 d = clamp(texelFetch(dlss_scene, clamp(pixel + ivec2(-1, 0), ivec2(0), last), 0).rgb, 0.0, 1.0);
+    vec3 f = clamp(texelFetch(dlss_scene, clamp(pixel + ivec2(1, 0), ivec2(0), last), 0).rgb, 0.0, 1.0);
+    vec3 h = clamp(texelFetch(dlss_scene, clamp(pixel + ivec2(0, 1), ivec2(0), last), 0).rgb, 0.0, 1.0);
+    vec3 mn4 = min(min(b, d), min(f, h));
+    vec3 mx4 = max(max(b, d), max(f, h));
+    vec3 hit_min = mn4 / (4.0 * mx4 + 1.0e-5);
+    vec3 hit_max = (1.0 - mx4) / (4.0 * mn4 - 4.0 - 1.0e-5);
+    vec3 lobe_rgb = max(-hit_min, hit_max);
+    const float limit = 0.25 - 1.0 / 16.0;
+    float lobe = max(-limit, min(max(lobe_rgb.r, max(lobe_rgb.g, lobe_rgb.b)), 0.0)) *
+                 controls.sharpness;
+    return clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 1.0);
 }
 
 void main() {
@@ -23,7 +47,7 @@ void main() {
     vec2 uv = (vec2(pixel) + 0.5) / vec2(extent);
     vec3 composite = textureLod(native_composite, uv, 0).rgb;
     if (controls.use_dlss != 0) {
-        vec3 encoded_scene = max(texelFetch(dlss_scene, pixel, 0).rgb, vec3(0.0));
+        vec3 encoded_scene = sharpened_scene(pixel, extent);
         vec3 scene = encode_srgb(encoded_scene * encoded_scene);
         vec3 reference = textureLod(native_scene, uv, 0).rgb;
         vec3 overlay = composite - reference;

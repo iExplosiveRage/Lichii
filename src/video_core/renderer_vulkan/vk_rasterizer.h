@@ -247,6 +247,7 @@ private:
 #ifdef EGLANTINE_STREAMLINE
     bool OcarinaDlssEnabled() const;
     void TrackOcarinaCamera();
+    void JitterOcarinaDraw();
     void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
     bool TryOcarinaDlss(const ComputePipeline& pipeline, bool replace);
     void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
@@ -305,6 +306,18 @@ private:
     std::optional<u64> oot_dlss_frame;
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
+    VkExtent2D oot_dlss_extent{}; ///< scene size of the last frame NVIDIA DLSS drew
+    /// Sub-pixel camera jitter for NVIDIA DLSS (JitterOcarinaDraw).
+    struct OcarinaJitter {
+        u64 frame = ~0ULL;           ///< render_trace_frame the rest belongs to
+        std::array<f32, 2> value{};  ///< this frame's offset, render pixels
+        VkExtent2D extent{};         ///< the scene size its draws have
+        bool active{};               ///< NVIDIA DLSS drew the last frame
+        u32 draws{};                 ///< draws given the offset this frame
+        GPUVAddr camera{};           ///< the camera buffer last checked this frame
+        bool camera_perspective{};
+        std::array<f32, 2> applied{}; ///< the offset the viewports carry now
+    } oot_jitter;
     struct OcarinaActorPose {
         u64 frame{};
         const Tegra::MemoryManager* channel{};

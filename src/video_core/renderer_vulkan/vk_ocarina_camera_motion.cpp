@@ -7,6 +7,7 @@
 
 #ifdef EGLANTINE_STREAMLINE
 #include "common/logging.h"
+#include "common/settings.h"
 #include "video_core/host_shaders/ocarina_dlss_color_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_output_comp_spv.h"
 #include "video_core/host_shaders/ocarina_dlss_4k_composite_comp_spv.h"
@@ -483,7 +484,12 @@ class OcarinaCompositePass final : public ComputePass {
         return result;
     }();
     static constexpr DescriptorBankInfo bank{.textures = 3, .images = 1, .score = 4};
-    static constexpr std::array push{VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(u32)}};
+    struct Controls {
+        u32 use_dlss;
+        f32 sharpness; ///< RCAS strength, exp2(-stops); 0 is off
+    };
+    static constexpr std::array push{
+        VkPushConstantRange{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Controls)}};
 
 public:
     OcarinaCompositePass(const Device& device_, Scheduler& scheduler, DescriptorPool& pool)
@@ -508,7 +514,13 @@ public:
             cmd.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
             cmd.BindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, *layout, 0, set, {});
             const u32 enabled = !upscaler.Failed();
-            cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, enabled);
+            // Settings nvidia_dlss_sharpening: RCAS stops x 100, as for FSR; 200 (0%) is off.
+            const int slider = Settings::values.nvidia_dlss_sharpening.GetValue();
+            const Controls controls{
+                .use_dlss = enabled,
+                .sharpness = slider < 200 ? std::exp2(-static_cast<f32>(slider) / 100.0f) : 0.0f,
+            };
+            cmd.PushConstants(*layout, VK_SHADER_STAGE_COMPUTE_BIT, controls);
             cmd.Dispatch(3840 / 8, 2160 / 8, 1);
             const VkMemoryBarrier complete{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -689,14 +701,31 @@ VkImageView OcarinaLiveDlss::CompositedView() const {
 bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView target, VkExtent2D extent,
                             VkExtent2D output_extent, VkExtent2D target_extent,
                             const Matrix& current, const Matrix& previous,
-                            const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame) {
+                            const OcarinaActorMesh& mesh, VkImage depth_image, u64 frame,
+                            std::array<f32, 2> jitter) {
     auto& state = *impl;
     if (state.last_frame == frame || state.upscaler.Failed()) {
         return false;
     }
-    const auto transform = ClipToPreviousClip(current, previous);
+    auto transform = ClipToPreviousClip(current, previous);
     if (!transform) {
         return false;
+    }
+    // With the host's jitter (RasterizerVulkan::JitterOcarinaDraw) a pixel shows the surface of
+    // the unjittered pixel minus the offset: take the camera motion from there, and measure it
+    // from there too, so the vectors stay free of the jitter as NVIDIA DLSS expects. The motion
+    // pass maps a pixel to clip space as x = 2 * u - 1, y = 1 - 2 * v.
+    if (jitter[0] != 0.0f || jitter[1] != 0.0f) {
+        const f32 dx = 2.0f * jitter[0] / static_cast<f32>(extent.width);
+        const f32 dy = 2.0f * jitter[1] / static_cast<f32>(extent.height);
+        Matrix& m = *transform; // rows, previous clip = m * clip
+        for (size_t row = 0; row < 4; ++row) {
+            m[row * 4 + 3] += m[row * 4 + 0] * -dx + m[row * 4 + 1] * dy;
+        }
+        for (size_t col = 0; col < 4; ++col) {
+            m[0 * 4 + col] += dx * m[3 * 4 + col];
+            m[1 * 4 + col] += -dy * m[3 * 4 + col];
+        }
     }
     state.scheduler.GetMasterSemaphore().Refresh();
     const auto slot = std::ranges::find_if(state.slots, [&](const auto& entry) {
@@ -747,7 +776,7 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
                                COLOR_RANGE, VK_IMAGE_ASPECT_COLOR_BIT},
             .render_size = extent,
             .upscale_size = output_extent,
-            .jitter = {0.0f, 0.0f},
+            .jitter = jitter,
             .motion_vector_scale = {1.0f, 1.0f},
             .reset = reset,
             .depth_inverted = false,

@@ -773,6 +773,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 #ifdef EGLANTINE_STREAMLINE
     TrackOcarinaCamera();
     TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
+    JitterOcarinaDraw();
 #endif
     TracePendingCpuWrites(false, pipeline->ShaderHashes());
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
@@ -2421,7 +2422,82 @@ bool OcarinaSceneSized(u32 width, u32 height, VkExtent2D scene) {
     return width >= scene.width && width < scene.width + 16 && height >= scene.height &&
            height < scene.height + 16;
 }
+
+f32 Halton(u32 index, u32 base) {
+    f32 result = 0.0f;
+    f32 fraction = 1.0f;
+    while (index > 0) {
+        fraction /= static_cast<f32>(base);
+        result += fraction * static_cast<f32>(index % base);
+        index /= base;
+    }
+    return result;
+}
+
+/// The scene camera's projection (rows): GL-style perspective.
+bool IsPerspectiveProjection(const std::array<f32, 16>& projection) {
+    for (const f32 value : projection) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    return projection[0] > 0.0f && projection[5] > 0.0f && projection[14] == -1.0f &&
+           projection[15] == 0.0f && projection[12] == 0.0f && projection[13] == 0.0f;
+}
 } // Anonymous namespace
+
+/// The game renders without jitter, so NVIDIA DLSS gets the same samples every frame and can't
+/// add detail (lower modes looked blocky). While NVIDIA DLSS drew the last frame, each draw of the
+/// scene's perspective camera (vertex constant buffer 3) into a 32-bit depth buffer at the scene's
+/// size, or up to 16 pixels larger (the game's aligned copies), moves by this frame's sub-pixel
+/// offset (Halton 2, 3 over 16 frames): the depth prepass and the colour pass alike, since the
+/// colour pass tests EQUAL against the prepass depth. Shadow maps, reflections and screen passes
+/// keep their place. NVIDIA DLSS gets the offset with the frame. EDEN_NX2_OOT_JITTER=0 turns it off.
+void RasterizerVulkan::JitterOcarinaDraw() {
+    auto& jitter = oot_jitter;
+    if (jitter.frame != render_trace_frame) {
+        static const bool disabled = [] {
+            const char* const value = std::getenv("EDEN_NX2_OOT_JITTER");
+            return value && value[0] == '0';
+        }();
+        jitter.frame = render_trace_frame;
+        jitter.draws = 0;
+        jitter.camera = 0;
+        jitter.active = !disabled && OcarinaDlssEnabled() && oot_dlss_frame &&
+                        *oot_dlss_frame + 1 == render_trace_frame;
+        jitter.extent = oot_dlss_extent;
+        const u32 index = static_cast<u32>(render_trace_frame % 16) + 1;
+        jitter.value = {Halton(index, 2) - 0.5f, Halton(index, 3) - 0.5f};
+    }
+    std::array<f32, 2> offset{};
+    const auto& regs = maxwell3d->regs;
+    if (jitter.active && regs.viewport_scale_offset_enabled && regs.zeta_enable &&
+        regs.zeta.format == Tegra::DepthFormat::Z32_FLOAT &&
+        OcarinaSceneSized(regs.zeta_size.width, regs.zeta_size.height, jitter.extent)) {
+        constexpr u32 projection_offset = 0x70;
+        const auto& camera = maxwell3d->state.shader_stages[0].const_buffers[3];
+        if (camera.enabled && camera.size >= projection_offset + 64) {
+            if (camera.address != jitter.camera) {
+                jitter.camera = camera.address;
+                jitter.camera_perspective = false;
+                if (gpu_memory->IsFullyMappedRange(camera.address + projection_offset, 64)) {
+                    std::array<f32, 16> projection;
+                    gpu_memory->ReadBlockUnsafe(camera.address + projection_offset,
+                                                projection.data(), sizeof(projection));
+                    jitter.camera_perspective = IsPerspectiveProjection(projection);
+                }
+            }
+            if (jitter.camera_perspective) {
+                offset = jitter.value;
+                ++jitter.draws;
+            }
+        }
+    }
+    if (offset != jitter.applied) {
+        jitter.applied = offset;
+        state_tracker.InvalidateViewports();
+    }
+}
 
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
@@ -2723,10 +2799,17 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         }
         const VkExtent2D target_extent{target.size.width, target.size.height};
         const VkExtent2D output_extent = upscale_4k ? VkExtent2D{3840, 2160} : target_extent;
+        // This frame's scene draws carry the jitter only if NVIDIA DLSS drew the last frame at the
+        // same scene size (JitterOcarinaDraw).
+        const bool jittered = oot_jitter.frame == render_trace_frame && oot_jitter.active &&
+                              oot_jitter.draws != 0 && oot_jitter.extent.width == extent.width &&
+                              oot_jitter.extent.height == extent.height;
+        const std::array<f32, 2> frame_jitter =
+            jittered ? oot_jitter.value : std::array<f32, 2>{};
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
-                                                   render_trace_frame);
+                                                   render_trace_frame, frame_jitter);
         if (!recorded) {
             return fail("DLSS declined the frame");
         }
@@ -2736,6 +2819,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
             oot_4k_guest_present = VK_NULL_HANDLE;
         }
         oot_dlss_frame = render_trace_frame;
+        oot_dlss_extent = extent;
         oot_fallback_reason = nullptr;
         return true;
     } catch (const vk::Exception& error) {
@@ -3324,7 +3408,7 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
     const float scale = is_rescaling ? Settings::values.resolution_info.up_factor : 1.0f;
-    const std::array viewport_list{
+    std::array viewport_list{
         GetViewportState(device, regs, 0, scale),  GetViewportState(device, regs, 1, scale),
         GetViewportState(device, regs, 2, scale),  GetViewportState(device, regs, 3, scale),
         GetViewportState(device, regs, 4, scale),  GetViewportState(device, regs, 5, scale),
@@ -3334,6 +3418,15 @@ void RasterizerVulkan::UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& reg
         GetViewportState(device, regs, 12, scale), GetViewportState(device, regs, 13, scale),
         GetViewportState(device, regs, 14, scale), GetViewportState(device, regs, 15, scale),
     };
+#ifdef EGLANTINE_STREAMLINE
+    // Ocarina of Time's sub-pixel jitter for NVIDIA DLSS (JitterOcarinaDraw), in render pixels.
+    if (oot_jitter.applied[0] != 0.0f || oot_jitter.applied[1] != 0.0f) {
+        for (VkViewport& viewport : viewport_list) {
+            viewport.x += oot_jitter.applied[0];
+            viewport.y += oot_jitter.applied[1];
+        }
+    }
+#endif
     scheduler.Record([this, viewport_list](vk::CommandBuffer cmdbuf) {
         const u32 num_viewports = std::min<u32>(device.GetMaxViewports(), Maxwell::NumViewports);
         const vk::Span<VkViewport> viewports(viewport_list.data(), num_viewports);
