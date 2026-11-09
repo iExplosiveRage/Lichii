@@ -3348,6 +3348,8 @@ private:
         const char* value = std::getenv("EDEN_NX2_SKIP_SAME");
         return value == nullptr || value[0] != '0';
     }();
+    /// EDEN_NX2_PERF_VERIFY, read per engine: static initialization runs before nx2_switches.txt.
+    const bool perf_verify = VideoCommon::Nx2Perf::Verify();
 
     /// Handles writes to the macro uploading register.
     void ProcessMacroUpload(u32 data);
